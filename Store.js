@@ -118,6 +118,224 @@ function parseOtpauth(uri) {
   })
 }
 
+// ------------------------------------------------------- otpauth-migration://
+
+// Google Authenticator's batch export produces a QR holding a single
+// otpauth-migration://offline?data=<base64> link. The data parameter is a
+// protobuf message with one OtpParameters submessage per account:
+//
+//   OtpParameters {
+//     1: secret   (bytes)      raw secret, not base32
+//     2: name     (string)     "issuer:account" or just "account"
+//     3: issuer   (string)
+//     4: algorithm (varint)    1 SHA1 · 2 SHA256 · 3 SHA512 · 4 MD5
+//     5: digits   (varint)     1 six · 2 eight
+//     6: type     (varint)     0 HOTP · 1 TOTP
+//   }
+//
+// Decoding it here is what makes an image import able to enroll a whole
+// authenticator in one pass.
+
+var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+function base64ToBytes(text) {
+  // Standard base64 and the URL-safe variant both arrive; normalise to one.
+  var clean = String(text || "")
+    .replace(/-/g, "+").replace(/_/g, "/")
+    .replace(/[^A-Za-z0-9+\/]/g, "")
+  var out = []
+  var acc = 0, bits = 0
+  for (var i = 0; i < clean.length; i++) {
+    acc = (acc << 6) | B64_ALPHABET.indexOf(clean.charAt(i))
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out.push((acc >> bits) & 0xff)
+    }
+  }
+  return out
+}
+
+var B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+function bytesToBase32(bytes) {
+  var out = ""
+  var acc = 0, bits = 0
+  for (var i = 0; i < bytes.length; i++) {
+    acc = (acc << 8) | bytes[i]
+    bits += 8
+    while (bits >= 5) {
+      bits -= 5
+      out += B32_ALPHABET.charAt((acc >> bits) & 31)
+    }
+  }
+  if (bits > 0) out += B32_ALPHABET.charAt((acc << (5 - bits)) & 31)
+  return out
+}
+
+// Account names arrive as raw UTF-8 bytes inside the protobuf, and this JS
+// environment offers no TextDecoder, so they are decoded by hand.
+function utf8Decode(bytes) {
+  var out = ""
+  var i = 0
+  while (i < bytes.length) {
+    var b = bytes[i++]
+    var cp
+    if (b < 0x80) {
+      cp = b
+    } else if ((b & 0xe0) === 0xc0 && i < bytes.length) {
+      cp = ((b & 0x1f) << 6) | (bytes[i++] & 0x3f)
+    } else if ((b & 0xf0) === 0xe0 && i + 1 < bytes.length) {
+      cp = ((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
+    } else if ((b & 0xf8) === 0xf0 && i + 2 < bytes.length) {
+      cp = ((b & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12)
+        | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
+    } else {
+      cp = 0xfffd  // replacement character: never throw on hostile bytes
+    }
+    if (cp > 0xffff) {
+      cp -= 0x10000
+      out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff))
+    } else {
+      out += String.fromCharCode(cp)
+    }
+  }
+  return out
+}
+
+// Walks protobuf fields, handing each to `visit` as (fieldNumber, wireType,
+// value): a Number for varints, a byte array for length-delimited fields.
+// Only these two wire types appear in this format; anything else means the
+// bytes are not a migration payload at all.
+function readProtoFields(bytes, visit) {
+  var pos = 0
+
+  function varint() {
+    var value = 0, shift = 0, b
+    do {
+      if (pos >= bytes.length) throw new Error("The QR payload is truncated")
+      // Values can exceed 32 bits (counters are uint64), so no bitwise ops.
+      value += (bytes[pos] & 0x7f) * Math.pow(2, shift)
+      shift += 7
+      if (shift > 70) throw new Error("The QR payload is malformed")
+    } while (bytes[pos++] & 0x80)
+    return value
+  }
+
+  while (pos < bytes.length) {
+    var tag = varint()
+    var field = Math.floor(tag / 8)
+    var wire = tag % 8
+    if (wire === 0) {
+      visit(field, wire, varint())
+    } else if (wire === 2) {
+      var len = varint()
+      if (pos + len > bytes.length) throw new Error("The QR payload is truncated")
+      visit(field, wire, bytes.slice(pos, pos + len))
+      pos += len
+    } else {
+      throw new Error("The QR payload is malformed")
+    }
+  }
+}
+
+var MIGRATION_ALGORITHMS = { 0: "", 1: "SHA1", 2: "SHA256", 3: "SHA512", 4: "MD5" }
+
+// Parses an otpauth-migration:// link into { accounts, errors }: every account
+// that could be normalized, plus a reason per one that had to be skipped. One
+// bad entry — a HOTP account, say — must not sink the other nine.
+function parseMigration(uri) {
+  var text = String(uri || "").trim()
+  var match = text.match(/^otpauth-migration:\/\/offline(?:\?(.*))?$/i)
+  if (!match) throw new Error("Not a Google Authenticator export")
+
+  var data = null
+  var pairs = (match[1] || "").split("&")
+  for (var i = 0; i < pairs.length; i++) {
+    var eq = pairs[i].indexOf("=")
+    if (eq < 0) continue
+    try {
+      if (pairs[i].substring(0, eq).toLowerCase() === "data") {
+        data = decodeURIComponent(pairs[i].substring(eq + 1))
+        break
+      }
+    } catch (e) { /* keep looking */ }
+  }
+  if (!data) throw new Error("The export link carries no payload")
+
+  var payload = base64ToBytes(data)
+  if (payload.length === 0) throw new Error("The export payload could not be decoded")
+
+  var accounts = []
+  var errors = []
+
+  readProtoFields(payload, function(field, wire, value) {
+    // Field 1 repeats once per account. Field 2 is a version number; ignore it.
+    if (field !== 1 || wire !== 2) return
+
+    var secretBytes = [], name = "", issuer = "", algorithm = 0,
+        digitsEnum = 0, typeEnum = -1
+    readProtoFields(value, function(f, w, v) {
+      if (w === 0 && f === 4) algorithm = v
+      else if (w === 0 && f === 5) digitsEnum = v
+      else if (w === 0 && f === 6) typeEnum = v
+      else if (w === 2 && f === 1) secretBytes = v
+      else if (w === 2 && f === 2) name = utf8Decode(v)
+      else if (w === 2 && f === 3) issuer = utf8Decode(v)
+    })
+
+    try {
+      if (typeEnum === 0) {
+        throw new Error("Counter-based (HOTP) codes are not supported")
+      }
+      // The name field uses the same "issuer:account" convention as an
+      // otpauth label — but plain text here, not percent-encoded.
+      var colon = name.indexOf(":")
+      var namedIssuer = colon > 0 ? name.substring(0, colon) : ""
+      var namedAccount = colon > 0 ? name.substring(colon + 1) : name
+      accounts.push(normalizeAccount({
+        label: namedAccount.trim(),
+        issuer: issuer.length > 0 ? issuer : namedIssuer,
+        secret: bytesToBase32(secretBytes),
+        digits: digitsEnum === 2 ? 8 : 6,
+        period: 30,
+        algorithm: MIGRATION_ALGORITHMS[algorithm]
+      }))
+    } catch (e) {
+      errors.push(cleanText(name).length > 0 ? name + ": " + e.message : e.message)
+    }
+  })
+
+  return { accounts: accounts, errors: errors }
+}
+
+// Reads every otpauth link in a blob of decoded-QR output — one code per line.
+// A plain otpauth:// line yields one account; an Authenticator export line can
+// carry many. Returns what parsed plus why the rest did not, so the caller can
+// import the good half and report the remainder.
+function parseOtpauthBatch(text) {
+  var lines = String(text || "").split("\n")
+  var accounts = []
+  var errors = []
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (line.length === 0) continue
+    if (!/^otpauth/i.test(line)) continue
+    try {
+      if (/^otpauth-migration:\/\//i.test(line)) {
+        var migration = parseMigration(line)
+        for (var j = 0; j < migration.accounts.length; j++) accounts.push(migration.accounts[j])
+        for (j = 0; j < migration.errors.length; j++) errors.push(migration.errors[j])
+      } else {
+        accounts.push(parseOtpauth(line))
+      }
+    } catch (e) {
+      errors.push(e.message)
+    }
+  }
+  return { accounts: accounts, errors: errors }
+}
+
 // ------------------------------------------------------------- normalisation
 
 // Applies defaults, coerces types, and rejects anything out of range. The

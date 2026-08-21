@@ -257,7 +257,11 @@ Item {
     _drainAdds()
   }
 
-  function addMany(accounts) {
+  // `verb` names the operation in the completion message — "Restored" for an
+  // export file, "Imported" when the batch came from QR codes in an image.
+  function addMany(accounts, verb) {
+    _batchVerb = typeof verb === "string" && verb.length > 0 ? verb : "Restored"
+
     if (accounts.length === 0) {
       restoreFinished(false, "That export contained no accounts")
       return
@@ -280,7 +284,7 @@ Item {
 
     _restoreSkipped = skipped
     if (added === 0) {
-      restoreFinished(false, "Every account in that file is already here")
+      restoreFinished(false, "Every account found is already here")
       return
     }
 
@@ -290,6 +294,7 @@ Item {
   }
 
   property int _restoreSkipped: 0
+  property string _batchVerb: "Restored"
 
   function _drainAdds() {
     if (_adding) return
@@ -297,8 +302,8 @@ Item {
       if (_restoring) {
         _restoring = false
         restoreFinished(true, _restoreSkipped > 0
-          ? "Restored, skipping " + _restoreSkipped + " already here"
-          : "Restored")
+          ? _batchVerb + ", skipping " + _restoreSkipped + " already here"
+          : _batchVerb)
       }
       return
     }

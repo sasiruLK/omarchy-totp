@@ -27,7 +27,9 @@ const Totp = loadLibrary("Totp.js",
 const S = loadLibrary("Store.js", [
   "cleanText", "isBlank", "splitUri", "splitLabel", "parseOtpauth",
   "normalizeAccount", "newId", "toRecord", "parseIndex", "serializeIndex",
-  "matches", "groupCode", "toOtpauth", "buildExport", "parseExport"
+  "matches", "groupCode", "toOtpauth", "buildExport", "parseExport",
+  "base64ToBytes", "bytesToBase32", "utf8Decode", "parseMigration",
+  "parseOtpauthBatch"
 ], { Totp })
 
 let failures = 0
@@ -269,6 +271,148 @@ check("groups 6 digits", S.groupCode("482913"), "482 913")
 check("groups 7 digits", S.groupCode("4829134"), "4829 134")
 check("groups 8 digits", S.groupCode("48291340"), "4829 1340")
 check("leaves an empty code alone", S.groupCode(""), "")
+
+// --- otpauth-migration:// (Google Authenticator export) --------------------
+
+console.log("\notpauth-migration:// parsing")
+
+// Minimal protobuf writer for building fixtures: enough to emit the exact
+// shape Google Authenticator produces, without a dependency.
+function protoVarint(value) {
+  const out = []
+  do { out.push((value & 0x7f) | (value > 0x7f ? 0x80 : 0)); value >>>= 7 }
+  while (value > 0)
+  return Buffer.from(out)
+}
+function protoBytes(field, bytes) {
+  return Buffer.concat([
+    protoVarint(field * 8 + 2), protoVarint(bytes.length), bytes
+  ])
+}
+function protoInt(field, value) {
+  return Buffer.concat([protoVarint(field * 8), protoVarint(value)])
+}
+function otpParameters({ secret, name, issuer, algorithm = 1, digits = 1, type = 1 }) {
+  return Buffer.concat([
+    protoBytes(1, secret),
+    protoBytes(2, Buffer.from(name, "utf8")),
+    ...(issuer ? [protoBytes(3, Buffer.from(issuer, "utf8"))] : []),
+    protoInt(4, algorithm),
+    protoInt(5, digits),
+    protoInt(6, type)
+  ])
+}
+function migrationUri(params) {
+  // Field 1 repeats per account; field 2 is a version number.
+  const payload = Buffer.concat([
+    ...params.map((p) => protoBytes(1, otpParameters(p))),
+    protoInt(2, 1)
+  ])
+  return "otpauth-migration://offline?data=" + encodeURIComponent(payload.toString("base64"))
+}
+
+{
+  // Two accounts in one export, with non-default parameters on the second.
+  const uri = migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "GitHub:sasiru", issuer: "GitHub" },
+    { secret: Buffer.from("12345678901234567890123456789012"), name: "Twitter",
+      issuer: "", algorithm: 2, digits: 2 }
+  ])
+  const parsed = S.parseOtpauthBatch(uri)
+  check("migration imports both accounts", parsed.accounts.length, 2)
+  check("migration errors none", parsed.errors.length, 0)
+  const first = parsed.accounts[0]
+  check("migration label splits at colon", first.label, "sasiru")
+  check("migration issuer", first.issuer, "GitHub")
+  check("migration secret becomes base32", first.secret,
+    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+  check("migration default algorithm SHA1", first.algorithm, "SHA1")
+  check("migration default digits 6", first.digits, 6)
+  const second = parsed.accounts[1]
+  check("migration bare name keeps whole string", second.label, "Twitter")
+  check("migration issuer field empty stays empty", second.issuer, "")
+  check("migration SHA256 honoured", second.algorithm, "SHA256")
+  check("migration eight digits honoured", second.digits, 8)
+}
+
+// The name field's own colon wins only when there is no issuer submessage;
+// when both exist the dedicated issuer field is authoritative.
+{
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "Old:name", issuer: "New" }
+  ]))
+  check("migration issuer field beats name prefix", parsed.accounts[0].issuer, "New")
+}
+
+{
+  // A HOTP entry must be reported, not imported — and must not sink the rest.
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("1234567890"), name: "CounterOne", type: 0 },
+    { secret: Buffer.from("12345678901234567890"), name: "TimeBased" }
+  ]))
+  check("hotp sibling still imports", parsed.accounts.length, 1)
+  check("hotp account is named TimeBased", parsed.accounts[0].label, "TimeBased")
+  check("hotp entry is reported", parsed.errors.length, 1)
+}
+
+rejects("rejects a non-migration link as such",
+  () => S.parseMigration(`otpauth://totp/X?secret=${SEED}`),
+  "Not a Google Authenticator export")
+rejects("rejects an export without data", () => S.parseMigration("otpauth-migration://offline"),
+  "The export link carries no payload")
+rejects("rejects undecodable payload",
+  () => S.parseMigration("otpauth-migration://offline?data=!!!!"),
+  "The export payload could not be decoded")
+
+{
+  // Truncated protobuf must throw rather than loop or read past the end.
+  let threw = false
+  try {
+    S.parseMigration(`otpauth-migration://offline?data=${encodeURIComponent(
+      Buffer.from([0x0a, 0x20, 0x01]).toString("base64"))}`)
+  } catch (e) { threw = true }
+  check("truncated payload throws", threw, true)
+}
+
+{
+  // UTF-8 names survive the trip through raw bytes.
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "Iss:café ✓" }
+  ]))
+  check("utf-8 name decodes", parsed.accounts[0].label, "café ✓")
+}
+
+// --- mixed batch -------------------------------------------------------------
+
+console.log("\nMixed batches")
+{
+  const plain = `otpauth://totp/Plain?secret=${SEED}`
+  const migration = migrationUri([
+    { secret: Buffer.from("1234567890"), name: "FromExport" }
+  ])
+  const parsed = S.parseOtpauthBatch(`${plain}\n${migration}\nnot-a-link\n`)
+  check("batch mixes plain and export codes", parsed.accounts.length, 2)
+  check("non-link lines are ignored quietly", parsed.errors.length, 0)
+
+  const broken = S.parseOtpauthBatch("otpauth://totp/x?secret=nope!!\n")
+  check("a bad line is counted", broken.accounts.length, 0)
+  check("a bad line is reported", broken.errors.length, 1)
+  check("empty input yields nothing", S.parseOtpauthBatch("").accounts.length, 0)
+}
+
+// --- base32 / base64 helpers --------------------------------------------------
+
+console.log("\nByte helpers")
+check("base64 round-trips through bytes",
+  Buffer.from(S.base64ToBytes(Buffer.from("hello world").toString("base64")))
+    .toString(), "hello world")
+check("base64url variant is accepted",
+  Buffer.from(S.base64ToBytes("-_8")).toString("latin1"), "\xfb\xff")
+check("base32 of a single high byte", S.bytesToBase32([0x7f]), "P4")
+check("base32 of the RFC seed", S.bytesToBase32(
+  Array.from(Buffer.from("12345678901234567890"))),
+  "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+check("utf-8 decode of ascii", S.utf8Decode(Array.from(Buffer.from("abc"))), "abc")
 
 const row = { label: "alice@acme.com", issuer: "ACME" }
 check("matches on label", S.matches(row, "alice"), "true")

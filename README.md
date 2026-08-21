@@ -33,6 +33,11 @@ Click the bar icon, then **Add**:
   screen, finds the code and adds the account. Only if that turns up nothing —
   several QR codes on screen at once, or one too small to resolve — does it ask
   you to drag a box around the right one.
+- **Import QR codes from an image** — for a screenshot of a setup page saved
+  earlier, or an image someone sent you. Pick the file in the dialog that opens;
+  every two-factor QR code in the image is imported, and ones already stored are
+  skipped. A Google Authenticator export QR (`Export accounts` in its menu) is
+  understood too, and enrolls everything it carries in one pass.
 - **Paste an otpauth:// link** — for sites that offer the link instead of, or
   as well as, a QR code.
 - **Enter a secret by hand** — for the "can't scan it?" fallback key. Defaults
@@ -100,6 +105,7 @@ add and no sudo or pkexec is required.
 | `gnome-keyring` | Stores the shared secrets |
 | `libsecret` | `secret-tool`, which talks to the keyring |
 | `grim`, `slurp`, `zbar` | Screen-region QR scanning |
+| `zenity` | Choosing an image to import QR codes from |
 | `wl-clipboard` | Copying codes |
 | `wtype` | Typing codes into the focused window (optional) |
 | `gnupg` | Encrypting and reading exports |

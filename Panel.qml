@@ -56,6 +56,7 @@ Panel {
 
   readonly property var addActions: [
     { key: "scan", label: "Scan a QR code on screen" },
+    { key: "image", label: "Import QR codes from an image" },
     { key: "paste", label: "Paste an otpauth:// link" },
     { key: "manual", label: "Enter a secret by hand" },
     { key: "restore", label: "Restore from an encrypted export" }
@@ -149,6 +150,7 @@ Panel {
     if (key === "scan") scanQr()
     else if (key === "manual") beginManual()
     else if (key === "restore") beginRestore()
+    else if (key === "image") beginImageImport()
     else if (key === "paste") {
       linkField.text = ""
       linkVisible = true
@@ -300,6 +302,38 @@ Panel {
     scanDelay.restart()
   }
 
+  // Reads QR codes out of an image file rather than the screen. The usual
+  // case is a screenshot of a setup page saved earlier, or an image someone
+  // sent over chat. Every otpauth:// code in the image is imported as one
+  // batch, so a contact sheet of codes enrolls in a single pass.
+  // Every scanning route funnels decoded QR text through here, so a screen
+  // scan and an image import accept exactly the same things: plain otpauth://
+  // codes, and Google Authenticator export codes (otpauth-migration://), which
+  // can carry a whole authenticator at once. What parses is batched into the
+  // vault; what does not is reported without sinking the rest.
+  function importFoundLinks(text) {
+    var parsed = Store.parseOtpauthBatch(text)
+    if (parsed.accounts.length === 0) {
+      root.view = "add"
+      root.formError = parsed.errors.length > 0
+        ? "A QR code was found, but it did not hold a readable two-factor "
+          + "setup code."
+        : "No two-factor QR code found."
+      return false
+    }
+    if (parsed.errors.length > 0) {
+      root.flash(parsed.errors.length + " QR code(s) could not be read")
+    }
+    vault.addMany(parsed.accounts, "Imported")
+    return true
+  }
+
+  function beginImageImport() {
+    root.formError = ""
+    root.scanning = true
+    filePicker.running = true
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -336,7 +370,9 @@ Panel {
     onActionFailed: function(message) { root.flash(message) }
     onAccountAdded: {
       // A restore adds many accounts at once; let it finish before saying so.
-      if (root.view === "restore") return
+      // An image import batches the same way, but stays on the add view, so
+      // the guard has to cover the vault's batch state directly.
+      if (root.view === "restore" || vault._restoring) return
       root.backToList()
       root.flash("Added")
     }
@@ -440,7 +476,7 @@ Panel {
 
     command: ["bash", "-c",
       "grim - | zbarimg --raw -q -Sdisable -Sqrcode.enable - 2>/dev/null " +
-      "| grep -m1 -i '^otpauth://'"]
+      "| grep -m1 -i '^otpauth'"]
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -457,7 +493,7 @@ Panel {
         return
       }
       root.scanning = false
-      if (!root.submitLink(link)) root.flash(root.formError)
+      if (!root.importFoundLinks(link)) root.flash(root.formError)
     }
   }
 
@@ -469,7 +505,7 @@ Panel {
       "scan() { " +
       "  if [ -n \"$1\" ]; then grim -g \"$1\" -; else grim -; fi " +
       "  | zbarimg --raw -q -Sdisable -Sqrcode.enable - 2>/dev/null " +
-      "  | grep -m1 -i '^otpauth://'; " +
+      "  | grep -m1 -i '^otpauth'; " +
       "}; " +
       "found=$(scan) || true; " +
       "if [ -z \"$found\" ]; then " +
@@ -494,15 +530,67 @@ Panel {
         root.view = "add"
         // 3 is a cancelled selection, which needs no complaint; anything else
         // means we looked and found nothing usable.
-        root.formError = code === 3 ? ""
-          : "No two-factor QR code found. Make sure the code is on screen, "
-          + "then try again."
+        if (code !== 3) {
+          root.formError = "No two-factor QR code found. Make sure the code "
+            + "is on screen, then try again."
+        }
         return
       }
-      if (!root.submitLink(link)) {
-        root.view = "add"
-        root.flash(root.formError)
+      root.importFoundLinks(link)
+    }
+  }
+
+  // Step 1. Ask which image to look at. Exit 1 is a cancelled dialog, 
+  // which is not an error and gets no complaint.
+  Process {
+    id: filePicker
+    property string chosen: ""
+
+    command: ["zenity", "--file-selection",
+      "--title=Choose an image with a QR code"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: filePicker.chosen = text.trim()
+    }
+    stderr: StdioCollector { waitForEnd: true }
+
+    onExited: function(code) {
+      var path = chosen
+      chosen = ""
+      if (code !== 0 || path.length === 0) {
+        root.scanning = false
+        return
       }
+      imageScanner.command = ["bash", "-c",
+        "zbarimg --raw -q -Sdisable -Sqrcode.enable -- \"$1\" 2>/dev/null " +
+        "| grep -i '^otpauth'",
+        "omarchy-totp-image-scan", path]
+      imageScanner.running = true
+    }
+  }
+
+  // Step 2. Same decoder options as the screen scanners, minus grim: the
+  // pixels already exist in a file. No -m1 on the grep — an image may hold
+  // several codes, and every otpauth one of them is wanted.
+  //
+  // The path reaches zbarimg as an argument, never interpolated into the
+  // script text, so a filename cannot become shell syntax.
+  Process {
+    id: imageScanner
+    property string result: ""
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: imageScanner.result = text
+    }
+    stderr: StdioCollector { waitForEnd: true }
+
+    onExited: function(code) {
+      var text = result
+      result = ""
+      root.scanning = false
+      root.importFoundLinks(text)
     }
   }
 
