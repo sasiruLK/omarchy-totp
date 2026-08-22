@@ -630,6 +630,22 @@ Panel {
                   root.query = text
                   root.listIndex = 0
                 }
+                // The catcher stands down while this field has focus, so the
+                // keys that cannot collide with typing are forwarded by hand:
+                // arrows move the cursor, Enter copies, and Ctrl+Enter types,
+                // without leaving the field or losing the filter.
+                Keys.onUpPressed: root.moveCursor(-1)
+                Keys.onDownPressed: root.moveCursor(1)
+                Keys.onReturnPressed: function(event) { searchField.submit(event) }
+                Keys.onEnterPressed: function(event) { searchField.submit(event) }
+                function submit(event) {
+                  if (event.modifiers & Qt.ControlModifier) {
+                    var record = root.selectedRecord()
+                    if (record) root.typeCode(root.codeFor(record))
+                  } else {
+                    root.activateCursor()
+                  }
+                }
                 Keys.onEscapePressed: {
                   text = ""
                   keyCatcher.forceActiveFocus()
