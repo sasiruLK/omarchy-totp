@@ -296,47 +296,58 @@ function parseMigration(uri) {
   var accounts = []
   var errors = []
 
-  readProtoFields(payload, function(field, wire, value) {
-    // Field 1 repeats once per account. Field 2 is a version number; ignore it.
-    if (field !== 1 || wire !== 2) return
+  try {
+    readProtoFields(payload, function(field, wire, value) {
+      // Field 1 repeats once per account. Field 2 is a version number; ignore it.
+      if (field !== 1 || wire !== 2) return
 
-    var secretBytes = [], name = "", issuer = "", algorithm = 0,
-        digitsEnum = 0, typeEnum = -1
-    try {
-      readProtoFields(value, function(f, w, v) {
-        if (w === 0 && f === 4) algorithm = v
-        else if (w === 0 && f === 5) digitsEnum = v
-        else if (w === 0 && f === 6) typeEnum = v
-        else if (w === 2 && f === 1) secretBytes = v
-        else if (w === 2 && f === 2) name = utf8Decode(v)
-        else if (w === 2 && f === 3) issuer = utf8Decode(v)
-      })
+      var secretBytes = [], name = "", issuer = "", algorithm = 0,
+          digitsEnum = 0, typeEnum = -1
+      try {
+        readProtoFields(value, function(f, w, v) {
+          if (w === 0 && f === 4) algorithm = v
+          else if (w === 0 && f === 5) digitsEnum = v
+          else if (w === 0 && f === 6) typeEnum = v
+          else if (w === 2 && f === 1) secretBytes = v
+          else if (w === 2 && f === 2) name = utf8Decode(v)
+          else if (w === 2 && f === 3) issuer = utf8Decode(v)
+          // Unknown field numbers are ignored (forward-compatible). A known
+          // field with the wrong wire type is not: packed-repeated encoding
+          // would otherwise drop type/digits/algorithm and import defaults.
+          else if (f >= 1 && f <= 6) throw new Error("The QR payload is malformed")
+        })
 
-      if (typeEnum === 1) {
-        throw new Error("Counter-based (HOTP) codes are not supported")
+        if (typeEnum === 1) {
+          throw new Error("Counter-based (HOTP) codes are not supported")
+        }
+        // Missing (-1) and unspecified (0) are treated as TOTP, matching Google's
+        // protobuf default. Anything else is not a time-based code we can honour.
+        if (typeEnum !== 2 && typeEnum !== 0 && typeEnum !== -1) {
+          throw new Error("Unsupported otpauth type")
+        }
+        if (!Object.prototype.hasOwnProperty.call(MIGRATION_ALGORITHMS, algorithm)) {
+          throw new Error("Unsupported algorithm")
+        }
+        var named = splitMigrationName(name)
+        accounts.push(normalizeAccount({
+          label: named.account.trim(),
+          issuer: issuer.length > 0 ? issuer : named.issuer,
+          secret: bytesToBase32(secretBytes),
+          digits: normalizeDigits(digitsEnum),
+          period: 30,
+          algorithm: MIGRATION_ALGORITHMS[algorithm]
+        }))
+      } catch (e) {
+        var safeName = cleanText(name)
+        errors.push(safeName.length > 0 ? safeName + ": " + e.message : e.message)
       }
-      // Missing (-1) and unspecified (0) are treated as TOTP, matching Google's
-      // protobuf default. Anything else is not a time-based code we can honour.
-      if (typeEnum !== 2 && typeEnum !== 0 && typeEnum !== -1) {
-        throw new Error("Unsupported otpauth type")
-      }
-      if (!Object.prototype.hasOwnProperty.call(MIGRATION_ALGORITHMS, algorithm)) {
-        throw new Error("Unsupported algorithm")
-      }
-      var named = splitMigrationName(name)
-      accounts.push(normalizeAccount({
-        label: named.account.trim(),
-        issuer: issuer.length > 0 ? issuer : named.issuer,
-        secret: bytesToBase32(secretBytes),
-        digits: normalizeDigits(digitsEnum),
-        period: 30,
-        algorithm: MIGRATION_ALGORITHMS[algorithm]
-      }))
-    } catch (e) {
-      var safeName = cleanText(name)
-      errors.push(safeName.length > 0 ? safeName + ": " + e.message : e.message)
-    }
-  })
+    })
+  } catch (e) {
+    // A damaged tag after some entries must not discard the ones already
+    // collected. Completely unreadable payloads still throw.
+    if (accounts.length === 0) throw e
+    errors.push(e.message)
+  }
 
   return { accounts: accounts, errors: errors }
 }

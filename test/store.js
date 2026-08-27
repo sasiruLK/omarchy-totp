@@ -292,14 +292,17 @@ function protoBytes(field, bytes) {
 function protoInt(field, value) {
   return Buffer.concat([protoVarint(field * 8), protoVarint(value)])
 }
-function otpParameters({ secret, name, issuer, algorithm = 1, digits = 1, type = 2 }) {
+function otpParameters({ secret, name, issuer, algorithm = 1, digits = 1, type = 2, packed }) {
+  const encode = (field, value) => packed === field
+    ? protoBytes(field, Buffer.from([value]))
+    : protoInt(field, value)
   return Buffer.concat([
     protoBytes(1, secret),
     protoBytes(2, Buffer.from(name, "utf8")),
     ...(issuer ? [protoBytes(3, Buffer.from(issuer, "utf8"))] : []),
-    protoInt(4, algorithm),
-    protoInt(5, digits),
-    protoInt(6, type)
+    encode(4, algorithm),
+    encode(5, digits),
+    encode(6, type)
   ])
 }
 function migrationUri(params) {
@@ -375,6 +378,28 @@ function migrationUri(params) {
 }
 
 {
+  // Length-delimited encoding of a known enum must not drop the field and
+  // import protobuf defaults.
+  const packedHotp = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "PackedHotp", type: 1, packed: 6 }
+  ]))
+  check("length-delimited hotp is not imported", packedHotp.accounts.length, 0)
+  check("length-delimited hotp is reported", packedHotp.errors.length, 1)
+
+  const packedDigits = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "PackedDigits", digits: 3, packed: 5 }
+  ]))
+  check("length-delimited unknown digits are not imported", packedDigits.accounts.length, 0)
+  check("length-delimited unknown digits are reported", packedDigits.errors.length, 1)
+
+  const packedAlgo = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "PackedAlgo", algorithm: 9, packed: 4 }
+  ]))
+  check("length-delimited unknown algorithm is not imported", packedAlgo.accounts.length, 0)
+  check("length-delimited unknown algorithm is reported", packedAlgo.errors.length, 1)
+}
+
+{
   // Google's real payloads: type=2 is TOTP, type=1 is HOTP.
   const totp = S.parseOtpauthBatch(
     "otpauth-migration://offline?data=CjUKFDEyMzQ1Njc4OTAxMjM0NTY3ODkwEg5FeGFtcGxlOnRvdHBAeBoHRXhhbXBsZSABKAEwAhAB")
@@ -445,6 +470,23 @@ function migrationUri(params) {
   check("malformed entry does not sink sibling", parsed.accounts.length, 1)
   check("malformed entry sibling label", parsed.accounts[0].label, "Good")
   check("malformed entry is reported", parsed.errors.length, 1)
+}
+
+{
+  // A damaged tag after a valid account must keep what already parsed.
+  const good = otpParameters({
+    secret: Buffer.from("12345678901234567890"), name: "Kept"
+  })
+  const payload = Buffer.concat([
+    protoBytes(1, good),
+    protoVarint(2 * 8 + 5),
+    Buffer.alloc(4)
+  ])
+  const parsed = S.parseOtpauthBatch(
+    "otpauth-migration://offline?data=" + encodeURIComponent(payload.toString("base64")))
+  check("top-level damage keeps prior accounts", parsed.accounts.length, 1)
+  check("top-level damage sibling label", parsed.accounts[0].label, "Kept")
+  check("top-level damage is reported", parsed.errors.length, 1)
 }
 
 {
