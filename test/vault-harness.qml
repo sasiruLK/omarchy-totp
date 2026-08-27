@@ -28,6 +28,8 @@ ShellRoot {
   property int step: 0
   property int failures: 0
   property bool seeding: true
+  property bool expectWaitMessage: false
+  property bool sawWaitMessage: false
 
   // Left on disk for run.sh to assert against (mode, armour, no plaintext
   // secrets), then removed there.
@@ -42,6 +44,16 @@ ShellRoot {
     { label: "harness-three", issuer: "Three", secret: "MZXW6YTBOI======",
       digits: 8, period: 60, algorithm: "SHA256" }
   ]
+  readonly property var importedAccount: ({
+    label: "harness-imported", issuer: "Import",
+    secret: "NBSWY3DPEB3W64TMMQ======",
+    digits: 6, period: 30, algorithm: "SHA1"
+  })
+  readonly property var overlapAccount: ({
+    label: "harness-overlap", issuer: "Overlap",
+    secret: "KRUGS4ZANFZSA3TPOQ======",
+    digits: 6, period: 30, algorithm: "SHA1"
+  })
 
   // Values are stringified so a difference in whitespace is visible rather
   // than invisible — a trailing newline off a subprocess looks identical to a
@@ -146,6 +158,26 @@ ShellRoot {
     check("wrong passphrase was rejected", ok, false)
     check("account count unchanged by the failure", vault.records.length, plan.length)
 
+    console.log("\nImporting via addMany:")
+    vault.addMany([harness.importedAccount], "Imported")
+    harness.expectWaitMessage = true
+    vault.addMany([harness.overlapAccount], "Restored")
+  }
+
+  function afterImport(ok, message) {
+    check("import reported success", ok, true)
+    check("import used Imported verb", message, "Imported")
+    check("imported account is present", vault.records.length, plan.length + 1)
+    check("overlapping addMany was refused", harness.sawWaitMessage, true)
+    var foundImported = false
+    var foundOverlap = false
+    for (var i = 0; i < vault.records.length; i++) {
+      if (vault.records[i].label === harness.importedAccount.label) foundImported = true
+      if (vault.records[i].label === harness.overlapAccount.label) foundOverlap = true
+    }
+    check("imported label is in the index", foundImported, true)
+    check("overlapping account was not queued", foundOverlap, false)
+
     console.log("\nRemoving one account:")
     var target = vault.records[1].id
     vault.remove(target)
@@ -159,7 +191,7 @@ ShellRoot {
   }
 
   function verifyRemoval() {
-    check("account was dropped from the index", vault.records.length, plan.length - 1)
+    check("account was dropped from the index", vault.records.length, plan.length)
     var stillThere = false
     for (var i = 0; i < vault.records.length; i++) {
       if (vault.records[i].id === removeTimer.target) stillThere = true
@@ -190,13 +222,19 @@ ShellRoot {
       Qt.callLater(harness.addNext)
     }
     onActionFailed: function(message) {
+      if (harness.expectWaitMessage
+          && message === "Wait for the current import to finish") {
+        harness.expectWaitMessage = false
+        harness.sawWaitMessage = true
+        return
+      }
       console.log("FAIL   vault reported: " + message)
       harness.failures++
     }
 
     // Restore runs three times: a real one, the same file again (which must
-    // add nothing), and one with the wrong passphrase. The handler dispatches
-    // on how far through that sequence we are.
+    // add nothing), and one with the wrong passphrase. addMany then reuses
+    // the same signal for the image-import path.
     property int restoreCalls: 0
 
     onExportFinished: function(ok, message) { harness.afterExport(ok, message) }
@@ -204,7 +242,8 @@ ShellRoot {
       vault.restoreCalls++
       if (vault.restoreCalls === 1) harness.afterRestore(ok, message)
       else if (vault.restoreCalls === 2) harness.afterDuplicateRestore(ok, message)
-      else harness.afterBadPassphrase(ok, message)
+      else if (vault.restoreCalls === 3) harness.afterBadPassphrase(ok, message)
+      else harness.afterImport(ok, message)
     }
   }
 

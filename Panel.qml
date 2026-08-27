@@ -308,9 +308,11 @@ Panel {
   // batch, so a contact sheet of codes enrolls in a single pass.
   // Every scanning route funnels decoded QR text through here, so a screen
   // scan and an image import accept exactly the same things: plain otpauth://
-  // codes, and Google Authenticator export codes (otpauth-migration://), which
-  // can carry a whole authenticator at once. What parses is batched into the
-  // vault; what does not is reported without sinking the rest.
+  // codes, and Google Authenticator's otpauth-migration:// format, a
+  // protobuf-based export that is not the standardized otpauth:// URI. We
+  // decode it to import supported TOTP credentials, including a whole
+  // authenticator in one pass. What parses is batched into the vault; what
+  // does not is reported without sinking the rest.
   function importFoundLinks(text) {
     var parsed = Store.parseOtpauthBatch(text)
     if (parsed.accounts.length === 0) {
@@ -344,9 +346,14 @@ Panel {
     }
     root.formError = ""
     root.scanning = true
+    // zbarimg's numeric codes differ by version (1 vs 2 vs 4), so this
+    // script owns the contract: 2 means the path could not be read as an
+    // image. Everything else with empty stdout is "no otpauth QR".
     imageScanner.command = ["bash", "-c",
-      "zbarimg --raw -q -Sdisable -Sqrcode.enable -- \"$1\" 2>/dev/null " +
-      "| grep -i '^otpauth'",
+      "if [ ! -f \"$1\" ] || [ ! -r \"$1\" ]; then exit 2; fi\n" +
+      "found=$(zbarimg --raw -q -Sdisable -Sqrcode.enable -- \"$1\" 2>&1) || true\n" +
+      "if [ \"${found#ERROR:}\" != \"$found\" ]; then exit 2; fi\n" +
+      "printf %s \"$found\" | grep -i '^otpauth' || true",
       "omarchy-totp-image-scan", path]
     imageScanner.running = true
   }
@@ -387,7 +394,7 @@ Panel {
     onActionFailed: function(message) { root.flash(message) }
     onAccountAdded: {
       // A restore adds many accounts at once; let it finish before saying so.
-      // An image import batches the same way, but stays on the add view, so
+      // An image import batches the same way, but stays on the image view, so
       // the guard has to cover the vault's batch state directly.
       if (root.view === "restore" || vault.restoring) return
       root.backToList()
@@ -578,6 +585,14 @@ Panel {
       var text = result
       result = ""
       root.scanning = false
+      if (String(text || "").trim().length === 0) {
+        // 2 is the script's unreadable-path status, not zbarimg's — missing,
+        // directory and undecodable files must not look like "no QR".
+        root.formError = code === 2
+          ? "Could not read that image. Check the path and try again."
+          : "No two-factor QR code found."
+        return
+      }
       root.importFoundLinks(text)
     }
   }
@@ -1286,7 +1301,7 @@ Panel {
               width: parent.width
               text: "Reads every two-factor QR code in an image file — a "
                   + "screenshot of a setup page, or a Google Authenticator "
-                  + "export. Accounts already stored are skipped."
+                  + "migration QR. Accounts already stored are skipped."
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
               color: root.dim

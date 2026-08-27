@@ -36,8 +36,10 @@ Click the bar icon, then **Add**:
 - **Import QR codes from an image** — for a screenshot of a setup page saved
   earlier, or an image someone sent you. Enter the path to the file; every
   two-factor QR code in the image is imported, and ones already stored are
-  skipped. A Google Authenticator export QR (`Export accounts` in its menu) is
-  understood too, and enrolls everything it carries in one pass.
+  skipped. A Google Authenticator migration QR (`otpauth-migration://`, from
+  `Export accounts` in its menu) is also supported; other authenticators emit
+  the same format. These codes can contain multiple TOTP accounts and are
+  imported in one pass.
 - **Paste an otpauth:// link** — for sites that offer the link instead of, or
   as well as, a QR code.
 - **Enter a secret by hand** — for the "can't scan it?" fallback key. Defaults

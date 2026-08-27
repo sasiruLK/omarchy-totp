@@ -345,6 +345,25 @@ function migrationUri(params) {
 }
 
 {
+  // No issuer submessage: a plausible prefix still becomes the issuer.
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "GitHub:sasiru" }
+  ]))
+  check("name-only prefix becomes issuer", parsed.accounts[0].issuer, "GitHub")
+  check("name-only prefix leaves account", parsed.accounts[0].label, "sasiru")
+}
+
+{
+  // Plaintext names are not percent-encoded, so a colon in a URL must not
+  // be treated as the issuer separator.
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: '<img src="http://x">' }
+  ]))
+  check("html-like name stays one label", parsed.accounts[0].label, '<img src="http://x">')
+  check("html-like name has no issuer", parsed.accounts[0].issuer, "")
+}
+
+{
   // A HOTP entry must be reported, not imported — and must not sink the rest.
   const parsed = S.parseOtpauthBatch(migrationUri([
     { secret: Buffer.from("1234567890"), name: "CounterOne", type: 1 },
@@ -391,6 +410,53 @@ function migrationUri(params) {
   ]))
   check("unknown algorithm is not imported", unknownAlgo.accounts.length, 0)
   check("unknown algorithm is reported", unknownAlgo.errors.length, 1)
+}
+
+{
+  const unspecifiedDigits = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "UnspecifiedDigits", digits: 0 }
+  ]))
+  check("unspecified digits import as 6", unspecifiedDigits.accounts.length, 1)
+  check("unspecified digits are 6", unspecifiedDigits.accounts[0].digits, 6)
+  check("unspecified digits has no errors", unspecifiedDigits.errors.length, 0)
+}
+
+{
+  const unknownDigits = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "WeirdDigits", digits: 3 }
+  ]))
+  check("unknown digits are not imported", unknownDigits.accounts.length, 0)
+  check("unknown digits are reported", unknownDigits.errors.length, 1)
+}
+
+{
+  // A forbidden wire type inside one OtpParameters must not abort the batch.
+  const good = otpParameters({
+    secret: Buffer.from("12345678901234567890"), name: "Good"
+  })
+  const bad = Buffer.concat([protoVarint(1 * 8 + 5), Buffer.alloc(4)])
+  const payload = Buffer.concat([
+    protoBytes(1, good),
+    protoBytes(1, bad),
+    protoInt(2, 1)
+  ])
+  const parsed = S.parseOtpauthBatch(
+    "otpauth-migration://offline?data=" + encodeURIComponent(payload.toString("base64")))
+  check("malformed entry does not sink sibling", parsed.accounts.length, 1)
+  check("malformed entry sibling label", parsed.accounts[0].label, "Good")
+  check("malformed entry is reported", parsed.errors.length, 1)
+}
+
+{
+  const parsed = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("1234567890"), name: "A".repeat(300) + "\n", type: 1 }
+  ]))
+  check("overlong error name is reported", parsed.errors.length, 1)
+  const err = parsed.errors[0]
+  check("error name has no newline", err.indexOf("\n") < 0, "true")
+  check("error name is cleaned then capped", err.slice(0, 128), "A".repeat(128))
+  check("error uses cleaned prefix",
+    err.startsWith("A".repeat(128) + ": "), "true")
 }
 
 rejects("rejects a non-migration link as such",

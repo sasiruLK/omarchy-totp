@@ -120,7 +120,11 @@ function parseOtpauth(uri) {
 
 // ------------------------------------------------------- otpauth-migration://
 
-// Google Authenticator's batch export produces a QR holding a single
+// Google Authenticator's otpauth-migration format is a protobuf-based
+// migration format. It is not the same as the standardized otpauth:// URI
+// format; we decode it here to import supported TOTP credentials.
+//
+// A batch export produces a QR holding a single
 // otpauth-migration://offline?data=<base64> link. The data parameter is a
 // protobuf message with one OtpParameters submessage per account:
 //
@@ -129,7 +133,7 @@ function parseOtpauth(uri) {
 //     2: name     (string)     "issuer:account" or just "account"
 //     3: issuer   (string)
 //     4: algorithm (varint)    0 unspecified · 1 SHA1 · 2 SHA256 · 3 SHA512 · 4 MD5
-//     5: digits   (varint)     1 six · 2 eight
+//     5: digits   (varint)     0 unspecified · 1 six · 2 eight
 //     6: type     (varint)     0 unspecified · 1 HOTP · 2 TOTP
 //   }
 //
@@ -241,6 +245,29 @@ function readProtoFields(bytes, visit) {
 
 var MIGRATION_ALGORITHMS = { 0: "", 1: "SHA1", 2: "SHA256", 3: "SHA512", 4: "MD5" }
 
+function normalizeDigits(value) {
+  switch (value) {
+  case 0: // unspecified: Google Authenticator's default
+  case 1: // six digits
+    return 6
+  case 2:
+    return 8
+  default:
+    throw new Error("Unsupported digit count")
+  }
+}
+
+// Migration names are protobuf UTF-8, not percent-encoded otpauth paths.
+// Only split when the left-hand side looks like an issuer (no whitespace, no '<').
+function splitMigrationName(name) {
+  var text = String(name || "")
+  var colon = text.indexOf(":")
+  if (colon <= 0) return { issuer: "", account: text }
+  var prefix = text.substring(0, colon)
+  if (/[\s<]/.test(prefix)) return { issuer: "", account: text }
+  return { issuer: prefix, account: text.substring(colon + 1) }
+}
+
 // Parses an otpauth-migration:// link into { accounts, errors }: every account
 // that could be normalized, plus a reason per one that had to be skipped. One
 // bad entry — a HOTP account, say — must not sink the other nine.
@@ -275,16 +302,16 @@ function parseMigration(uri) {
 
     var secretBytes = [], name = "", issuer = "", algorithm = 0,
         digitsEnum = 0, typeEnum = -1
-    readProtoFields(value, function(f, w, v) {
-      if (w === 0 && f === 4) algorithm = v
-      else if (w === 0 && f === 5) digitsEnum = v
-      else if (w === 0 && f === 6) typeEnum = v
-      else if (w === 2 && f === 1) secretBytes = v
-      else if (w === 2 && f === 2) name = utf8Decode(v)
-      else if (w === 2 && f === 3) issuer = utf8Decode(v)
-    })
-
     try {
+      readProtoFields(value, function(f, w, v) {
+        if (w === 0 && f === 4) algorithm = v
+        else if (w === 0 && f === 5) digitsEnum = v
+        else if (w === 0 && f === 6) typeEnum = v
+        else if (w === 2 && f === 1) secretBytes = v
+        else if (w === 2 && f === 2) name = utf8Decode(v)
+        else if (w === 2 && f === 3) issuer = utf8Decode(v)
+      })
+
       if (typeEnum === 1) {
         throw new Error("Counter-based (HOTP) codes are not supported")
       }
@@ -296,21 +323,18 @@ function parseMigration(uri) {
       if (!Object.prototype.hasOwnProperty.call(MIGRATION_ALGORITHMS, algorithm)) {
         throw new Error("Unsupported algorithm")
       }
-      // The name field uses the same "issuer:account" convention as an
-      // otpauth label — but plain text here, not percent-encoded.
-      var colon = name.indexOf(":")
-      var namedIssuer = colon > 0 ? name.substring(0, colon) : ""
-      var namedAccount = colon > 0 ? name.substring(colon + 1) : name
+      var named = splitMigrationName(name)
       accounts.push(normalizeAccount({
-        label: namedAccount.trim(),
-        issuer: issuer.length > 0 ? issuer : namedIssuer,
+        label: named.account.trim(),
+        issuer: issuer.length > 0 ? issuer : named.issuer,
         secret: bytesToBase32(secretBytes),
-        digits: digitsEnum === 2 ? 8 : 6,
+        digits: normalizeDigits(digitsEnum),
         period: 30,
         algorithm: MIGRATION_ALGORITHMS[algorithm]
       }))
     } catch (e) {
-      errors.push(cleanText(name).length > 0 ? name + ": " + e.message : e.message)
+      var safeName = cleanText(name)
+      errors.push(safeName.length > 0 ? safeName + ": " + e.message : e.message)
     }
   })
 

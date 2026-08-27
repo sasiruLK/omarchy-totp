@@ -261,6 +261,12 @@ Item {
   // `verb` names the operation in the completion message — "Restored" for an
   // export file, "Imported" when the batch came from QR codes in an image.
   function addMany(accounts, verb) {
+    // One named batch at a time: _batchVerb is read when the queue drains, so
+    // a second call here would relabel the in-flight completion message.
+    if (_restoring) {
+      actionFailed("Wait for the current import to finish")
+      return
+    }
     _batchVerb = typeof verb === "string" && verb.length > 0 ? verb : "Restored"
 
     if (accounts.length === 0) {
