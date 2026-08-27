@@ -22,7 +22,7 @@ Panel {
   moduleName: "io.github.sasirulk.totp"
   ipcTarget: "io.github.sasirulk.totp"
 
-  // "list" | "add" | "manual" | "export" | "restore"
+  // "list" | "add" | "manual" | "export" | "restore" | "image"
   property string view: "list"
   property string query: ""
   property string notice: ""
@@ -314,7 +314,7 @@ Panel {
   function importFoundLinks(text) {
     var parsed = Store.parseOtpauthBatch(text)
     if (parsed.accounts.length === 0) {
-      root.view = "add"
+      if (root.view !== "image") root.view = "add"
       root.formError = parsed.errors.length > 0
         ? "A QR code was found, but it did not hold a readable two-factor "
           + "setup code."
@@ -329,9 +329,26 @@ Panel {
   }
 
   function beginImageImport() {
+    imagePathField.text = ""
+    root.formError = ""
+    root.view = "image"
+    Qt.callLater(function() { imagePathField.forceActiveFocus() })
+  }
+
+  function runImageImport() {
+    if (root.scanning) return
+    var path = vault.expandPath(imagePathField.text)
+    if (path.length === 0) {
+      root.formError = "Choose an image to scan"
+      return
+    }
     root.formError = ""
     root.scanning = true
-    filePicker.running = true
+    imageScanner.command = ["bash", "-c",
+      "zbarimg --raw -q -Sdisable -Sqrcode.enable -- \"$1\" 2>/dev/null " +
+      "| grep -i '^otpauth'",
+      "omarchy-totp-image-scan", path]
+    imageScanner.running = true
   }
 
   implicitWidth: button.implicitWidth
@@ -349,7 +366,7 @@ Panel {
       root.cursorActive = false
       root.listIndex = 0
       root.linkVisible = false
-      root.scanning = scanner.running || quickScanner.running
+      root.scanning = scanner.running || quickScanner.running || imageScanner.running
       searchField.text = ""
       vault.reload()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -372,7 +389,7 @@ Panel {
       // A restore adds many accounts at once; let it finish before saying so.
       // An image import batches the same way, but stays on the add view, so
       // the guard has to cover the vault's batch state directly.
-      if (root.view === "restore" || vault._restoring) return
+      if (root.view === "restore" || vault.restoring) return
       root.backToList()
       root.flash("Added")
     }
@@ -540,42 +557,13 @@ Panel {
     }
   }
 
-  // Step 1. Ask which image to look at. Exit 1 is a cancelled dialog, 
-  // which is not an error and gets no complaint.
-  Process {
-    id: filePicker
-    property string chosen: ""
-
-    command: ["zenity", "--file-selection",
-      "--title=Choose an image with a QR code"]
-
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: filePicker.chosen = text.trim()
-    }
-    stderr: StdioCollector { waitForEnd: true }
-
-    onExited: function(code) {
-      var path = chosen
-      chosen = ""
-      if (code !== 0 || path.length === 0) {
-        root.scanning = false
-        return
-      }
-      imageScanner.command = ["bash", "-c",
-        "zbarimg --raw -q -Sdisable -Sqrcode.enable -- \"$1\" 2>/dev/null " +
-        "| grep -i '^otpauth'",
-        "omarchy-totp-image-scan", path]
-      imageScanner.running = true
-    }
-  }
-
-  // Step 2. Same decoder options as the screen scanners, minus grim: the
-  // pixels already exist in a file. No -m1 on the grep — an image may hold
-  // several codes, and every otpauth one of them is wanted.
+  // Same decoder options as the screen scanners, minus grim: the pixels
+  // already exist in a file. No -m1 on the grep — an image may hold several
+  // codes, and every otpauth one of them is wanted.
   //
   // The path reaches zbarimg as an argument, never interpolated into the
-  // script text, so a filename cannot become shell syntax.
+  // script text, so a filename cannot become shell syntax. command is set by
+  // runImageImport immediately before launch.
   Process {
     id: imageScanner
     property string result: ""
@@ -624,6 +612,7 @@ Panel {
             || secretField.activeFocus || exportPathField.activeFocus
             || exportPassField.activeFocus || exportConfirmField.activeFocus
             || restorePathField.activeFocus || restorePassField.activeFocus
+            || imagePathField.activeFocus
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
@@ -675,6 +664,7 @@ Panel {
               if (root.view === "add") return "Add an account"
               if (root.view === "export") return "Export"
               if (root.view === "restore") return "Restore"
+              if (root.view === "image") return "Import from an image"
               if (vault.error.length > 0) return "Keyring unavailable"
               if (!vault.secretsLoaded && vault.records.length > 0) return "Unlocking…"
               return vault.records.length === 1 ? "1 account"
@@ -1274,6 +1264,78 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: root.runRestore()
+              }
+
+              Button {
+                text: "Cancel"
+                foreground: root.dim
+                fontFamily: root.fontFamily
+                onClicked: root.backToList()
+              }
+            }
+          }
+
+          // -------------------------------------------------------- image
+
+          Column {
+            visible: root.view === "image"
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              text: "Reads every two-factor QR code in an image file — a "
+                  + "screenshot of a setup page, or a Google Authenticator "
+                  + "export. Accounts already stored are skipped."
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            TextField {
+              id: imagePathField
+              width: parent.width
+              placeholderText: "~/screenshot.png"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              onAccepted: root.runImageImport()
+              Keys.onEscapePressed: root.backToList()
+            }
+
+            Text {
+              width: parent.width
+              text: "Reads from " + vault.expandPath(imagePathField.text)
+              textFormat: Text.PlainText
+              wrapMode: Text.WrapAnywhere
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: root.formError.length > 0
+              width: parent.width
+              text: root.formError
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                text: "Import"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.runImageImport()
               }
 
               Button {

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.sasirulk.totp",
   "name": "2FA",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "author": "Sasiru Ravihansa",
   "license": "MIT",
   "description": "TOTP authenticator for omarchy-shell. Live two-factor codes in the bar, secrets in your keyring, enrolment by scanning the QR code straight off the screen. Fully offline.",

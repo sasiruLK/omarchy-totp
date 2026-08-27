@@ -128,9 +128,9 @@ function parseOtpauth(uri) {
 //     1: secret   (bytes)      raw secret, not base32
 //     2: name     (string)     "issuer:account" or just "account"
 //     3: issuer   (string)
-//     4: algorithm (varint)    1 SHA1 · 2 SHA256 · 3 SHA512 · 4 MD5
+//     4: algorithm (varint)    0 unspecified · 1 SHA1 · 2 SHA256 · 3 SHA512 · 4 MD5
 //     5: digits   (varint)     1 six · 2 eight
-//     6: type     (varint)     0 HOTP · 1 TOTP
+//     6: type     (varint)     0 unspecified · 1 HOTP · 2 TOTP
 //   }
 //
 // Decoding it here is what makes an image import able to enroll a whole
@@ -285,8 +285,16 @@ function parseMigration(uri) {
     })
 
     try {
-      if (typeEnum === 0) {
+      if (typeEnum === 1) {
         throw new Error("Counter-based (HOTP) codes are not supported")
+      }
+      // Missing (-1) and unspecified (0) are treated as TOTP, matching Google's
+      // protobuf default. Anything else is not a time-based code we can honour.
+      if (typeEnum !== 2 && typeEnum !== 0 && typeEnum !== -1) {
+        throw new Error("Unsupported otpauth type")
+      }
+      if (!Object.prototype.hasOwnProperty.call(MIGRATION_ALGORITHMS, algorithm)) {
+        throw new Error("Unsupported algorithm")
       }
       // The name field uses the same "issuer:account" convention as an
       // otpauth label — but plain text here, not percent-encoded.

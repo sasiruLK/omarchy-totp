@@ -292,7 +292,7 @@ function protoBytes(field, bytes) {
 function protoInt(field, value) {
   return Buffer.concat([protoVarint(field * 8), protoVarint(value)])
 }
-function otpParameters({ secret, name, issuer, algorithm = 1, digits = 1, type = 1 }) {
+function otpParameters({ secret, name, issuer, algorithm = 1, digits = 1, type = 2 }) {
   return Buffer.concat([
     protoBytes(1, secret),
     protoBytes(2, Buffer.from(name, "utf8")),
@@ -347,12 +347,50 @@ function migrationUri(params) {
 {
   // A HOTP entry must be reported, not imported — and must not sink the rest.
   const parsed = S.parseOtpauthBatch(migrationUri([
-    { secret: Buffer.from("1234567890"), name: "CounterOne", type: 0 },
+    { secret: Buffer.from("1234567890"), name: "CounterOne", type: 1 },
     { secret: Buffer.from("12345678901234567890"), name: "TimeBased" }
   ]))
   check("hotp sibling still imports", parsed.accounts.length, 1)
   check("hotp account is named TimeBased", parsed.accounts[0].label, "TimeBased")
   check("hotp entry is reported", parsed.errors.length, 1)
+}
+
+{
+  // Google's real payloads: type=2 is TOTP, type=1 is HOTP.
+  const totp = S.parseOtpauthBatch(
+    "otpauth-migration://offline?data=CjUKFDEyMzQ1Njc4OTAxMjM0NTY3ODkwEg5FeGFtcGxlOnRvdHBAeBoHRXhhbXBsZSABKAEwAhAB")
+  check("google totp payload imports", totp.accounts.length, 1)
+  check("google totp payload has no errors", totp.errors.length, 0)
+  check("google totp payload label", totp.accounts[0].label, "totp@x")
+
+  const hotp = S.parseOtpauthBatch(
+    "otpauth-migration://offline?data=CjUKFDEyMzQ1Njc4OTAxMjM0NTY3ODkwEg5FeGFtcGxlOmhvdHBAeBoHRXhhbXBsZSABKAEwARAB")
+  check("google hotp payload is not imported", hotp.accounts.length, 0)
+  check("google hotp payload is reported", hotp.errors.length, 1)
+}
+
+{
+  const unspecified = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "Unspecified", type: 0 }
+  ]))
+  check("unspecified type imports as totp", unspecified.accounts.length, 1)
+  check("unspecified type has no errors", unspecified.errors.length, 0)
+}
+
+{
+  const unknownType = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "FutureType", type: 3 }
+  ]))
+  check("unknown type is not imported", unknownType.accounts.length, 0)
+  check("unknown type is reported", unknownType.errors.length, 1)
+}
+
+{
+  const unknownAlgo = S.parseOtpauthBatch(migrationUri([
+    { secret: Buffer.from("12345678901234567890"), name: "WeirdHash", algorithm: 9 }
+  ]))
+  check("unknown algorithm is not imported", unknownAlgo.accounts.length, 0)
+  check("unknown algorithm is reported", unknownAlgo.errors.length, 1)
 }
 
 rejects("rejects a non-migration link as such",

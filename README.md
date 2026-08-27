@@ -34,8 +34,8 @@ Click the bar icon, then **Add**:
   several QR codes on screen at once, or one too small to resolve — does it ask
   you to drag a box around the right one.
 - **Import QR codes from an image** — for a screenshot of a setup page saved
-  earlier, or an image someone sent you. Pick the file in the dialog that opens;
-  every two-factor QR code in the image is imported, and ones already stored are
+  earlier, or an image someone sent you. Enter the path to the file; every
+  two-factor QR code in the image is imported, and ones already stored are
   skipped. A Google Authenticator export QR (`Export accounts` in its menu) is
   understood too, and enrolls everything it carries in one pass.
 - **Paste an otpauth:// link** — for sites that offer the link instead of, or
@@ -104,8 +104,7 @@ add and no sudo or pkexec is required.
 |---|---|
 | `gnome-keyring` | Stores the shared secrets |
 | `libsecret` | `secret-tool`, which talks to the keyring |
-| `grim`, `slurp`, `zbar` | Screen-region QR scanning |
-| `zenity` | Choosing an image to import QR codes from |
+| `grim`, `slurp`, `zbar` | Screen-region and image-file QR scanning |
 | `wl-clipboard` | Copying codes |
 | `wtype` | Typing codes into the focused window (optional) |
 | `gnupg` | Encrypting and reading exports |

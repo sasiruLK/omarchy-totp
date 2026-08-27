@@ -226,6 +226,7 @@ Item {
   property var _addQueue: []
   property bool _adding: false
   property bool _restoring: false
+  readonly property bool restoring: _restoring
 
   // Same name, same issuer and same secret means this account is already
   // stored. Two rows generating identical codes is pure confusion, and
