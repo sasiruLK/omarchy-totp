@@ -152,29 +152,13 @@ Item {
     root.error = ""
     secretsLoaded = false
     secrets = ({})
-    var queue = []
-    for (var i = 0; i < records.length; i++) queue.push(records[i].id)
-    _pendingIds = queue
     busy = true
-    _nextSecret()
+    lookup.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.sasirulk.totp/helpers/get_all_secrets.py"]
+    lookup.running = true
   }
 
   function _nextSecret() {
-    if (_pendingIds.length === 0) {
-      busy = false
-      secretsLoaded = true
-      if (_pendingExport) {
-        var waiting = _pendingExport
-        _pendingExport = null
-        _runExport(waiting.path, waiting.passphrase)
-      }
-      return
-    }
-    var next = _pendingIds.shift()
-    lookup.accountId = next
-    lookup.command = ["secret-tool", "lookup",
-      "service", root.keyringService, "account", next]
-    lookup.running = true
+    // Deprecated: secrets are now loaded all at once.
   }
 
   // Drops every decrypted secret. Called when the panel closes so they are not
@@ -187,7 +171,6 @@ Item {
 
   Process {
     id: lookup
-    property string accountId: ""
     property string found: ""
 
     stdout: StdioCollector {
@@ -198,18 +181,27 @@ Item {
 
     onExited: function(code) {
       if (code === 0 && found.length > 0) {
-        var merged = {}
-        for (var key in root.secrets) merged[key] = root.secrets[key]
-        merged[accountId] = found
-        root.secrets = merged
-      } else if (code !== 0 && code !== 1) {
-        // Exit 1 is "no such item" — an account whose secret was removed from
-        // the keyring behind our back. Anything else means the Secret Service
-        // is unreachable, which the panel must say out loud.
+        try {
+          var parsed = JSON.parse(found)
+          if (parsed._error) {
+            root.error = "Keyring unavailable: " + parsed._error
+          } else {
+            root.secrets = parsed
+          }
+        } catch(e) {
+          root.error = "Failed to parse keyring data."
+        }
+      } else {
         root.error = "Keyring unavailable. Is gnome-keyring running and unlocked?"
       }
       found = ""
-      root._nextSecret()
+      busy = false
+      secretsLoaded = true
+      if (_pendingExport) {
+        var waiting = _pendingExport
+        _pendingExport = null
+        _runExport(waiting.path, waiting.passphrase)
+      }
     }
   }
 
