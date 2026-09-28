@@ -17,6 +17,18 @@
     "description": "Two-factor codes, generated locally from secrets held in your keyring",
     "category": "Productivity",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "yubikey": false
+    },
+    "schema": [
+      {
+        "key": "yubikey",
+        "type": "boolean",
+        "label": "YubiKey accounts",
+        "defaultValue": false,
+        "description": "Also show codes from OATH accounts on an inserted YubiKey. The key is only read while this is on; nothing is imported or stored."
+      }
+    ]
   }
 }

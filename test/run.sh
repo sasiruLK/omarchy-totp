@@ -22,6 +22,9 @@ node test/vectors.js | tail -2 || status=1
 echo "== Store.js =="
 node test/store.js | tail -2 || status=1
 
+echo "== YubiKey.js =="
+node test/yubikey.js | tail -2 || status=1
+
 if [[ ${TOTP_HARNESS:-0} != 1 ]]; then
   echo "== Vault.qml == skipped (set TOTP_HARNESS=1 to run; it purges your accounts)"
   exit $status

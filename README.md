@@ -73,6 +73,36 @@ You can also bind a key to open it, in `~/.config/hypr/bindings.conf`:
 bindd = SUPER, semicolon, 2FA codes, exec, omarchy-shell shell toggle io.github.sasirulk.totp
 ```
 
+## YubiKey accounts
+
+If you keep OATH accounts on a YubiKey, the panel can show and copy their codes
+as well. Turn it on with **Turn on** beside *YubiKey* at the bottom of the list.
+Until it is on, the plugin never runs `ykman` and reads nothing from the key.
+
+The key's OATH application is write-only — a secret can be written to it and
+never read back — so this is a *source*, not an import. The accounts stay on the
+key; nothing is copied into the keyring, and nothing here can be exported.
+
+- Codes are read when the panel opens. A credential that requires a touch is
+  listed without its code; click it and tap the key when it blinks.
+- HOTP (counter-based) accounts are listed but never read, because generating a
+  counter code advances the counter.
+- The countdown assumes the usual 30-second period, which `ykman` does not
+  report.
+
+It needs `yubikey-manager` and a running `pcscd`. The panel checks for both and
+offers the fix where the problem shows — install yubikey-manager, start the
+service, unlock the key, or check again for a key — so these commands are only
+for doing it by hand:
+
+```
+sudo pacman -S --needed yubikey-manager
+sudo systemctl enable --now pcscd.socket
+```
+
+Turn it off again with **Turn off**. The choice is stored in this widget's entry
+in `~/.config/omarchy/shell.json`, so it survives a reload and a reboot.
+
 ## Export and restore
 
 **Export accounts to an encrypted file**, at the bottom of the list, writes
@@ -99,8 +129,8 @@ open the file — including you.
 
 ## What it needs
 
-Everything is already part of a standard Omarchy install; there is nothing to
-add and no sudo or pkexec is required.
+Everything is already part of a standard Omarchy install; the only optional
+addition is `yubikey-manager`, and only if you use the YubiKey source.
 
 | | |
 |---|---|
@@ -110,6 +140,7 @@ add and no sudo or pkexec is required.
 | `wl-clipboard` | Copying codes |
 | `wtype` | Typing codes into the focused window (optional) |
 | `gnupg` | Encrypting and reading exports |
+| `yubikey-manager` | Reading OATH codes from a YubiKey (optional) |
 
 The keyring has to be unlocked, which it normally is from the moment you log
 in. If it is not, the panel says so instead of showing an empty list.
@@ -170,6 +201,9 @@ What this plugin does about it:
   this plugin is drawn with `Text.PlainText` so that cannot happen.
 - **No network access of any kind.** TOTP is entirely offline. There is no HTTP
   client, no remote image, and no telemetry in the source.
+- **The YubiKey source reads no secret and stores nothing.** `ykman` only ever
+  returns codes; the key cannot give up its secrets. The source is off unless
+  turned on, and no `ykman` process runs until it is.
 - **The account file is created with owner-only permissions**, not created and
   then corrected, so there is no window where another local user could read it.
 - **Every value from a QR code or a pasted link is validated** before it is
@@ -182,10 +216,11 @@ test/run.sh
 ```
 
 Covers the RFC 6238 test vectors for all three hash algorithms, the
-`otpauth://` parser, the export round trip, and how the store handles corrupt
-input. `TOTP_HARNESS=1 test/run.sh` additionally runs a Quickshell harness
-against the real keyring — it exports, purges, restores, and checks everything
-came back. That one destroys the accounts on the machine it runs on.
+`otpauth://` parser, the export round trip, the `ykman` output parser, and how
+the store handles corrupt input. `TOTP_HARNESS=1 test/run.sh` additionally runs
+a Quickshell harness against the real keyring — it exports, purges, restores,
+and checks everything came back. That one destroys the accounts on the machine
+it runs on.
 
 ## License
 
